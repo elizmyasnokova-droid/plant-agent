@@ -1,5 +1,5 @@
 """
-APScheduler — ежедневные напоминания о поливе.
+APScheduler — утренние и вечерние напоминания о поливе.
 """
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -12,58 +12,78 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 
-async def send_watering_reminders(bot):
-    """
-    Runs daily at REMINDER_HOUR.
-    Finds all users with overdue plants and sends them a reminder.
-    """
+async def send_morning_reminders(bot):
+    """Утром — напоминание всем у кого просрочен полив."""
     user_ids = await db.get_users_with_overdue_plants()
-    logger.info(f"Watering reminders: {len(user_ids)} users need reminding")
+    logger.info(f"Morning reminders: {len(user_ids)} users")
 
     for user_id in user_ids:
         schedule = await db.get_watering_schedule(user_id)
         overdue = schedule["overdue"]
         today = schedule["today"]
-
         if not overdue and not today:
             continue
 
-        lines = ["💧 *Напоминание о поливе!*\n"]
-
+        lines = ["🌅 *Доброе утро! Пора позаботиться о растениях.*\n"]
         if overdue:
             lines.append("⚠️ *Просрочено:*")
             for p in overdue:
                 name = p.get("nickname") or p["name"]
                 info = p.get("days_overdue", p.get("status", ""))
-                suffix = f" (на {info} д.)" if isinstance(info, int) else f" ({info})"
+                suffix = f" (+{info} дн.)" if isinstance(info, int) else f" ({info})"
                 lines.append(f"  🌿 {name}{suffix}")
 
         if today:
-            lines.append("\n🌊 *Сегодня нужно полить:*")
+            lines.append("\n💧 *Полить сегодня:*")
             for p in today:
-                name = p.get("nickname") or p["name"]
-                lines.append(f"  🌿 {name}")
+                lines.append(f"  🌿 {p.get('nickname') or p['name']}")
 
-        lines.append("\nНапиши мне «полил [растение]» чтобы отметить полив ✅")
+        lines.append("\nНапиши «полил [растение]» или нажми кнопку 💧 в /plants")
+
+        try:
+            await bot.send_message(user_id, "\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"Morning reminder failed for {user_id}: {e}")
+
+
+async def send_evening_reminders(bot):
+    """Вечером — повторное напоминание только тем кто НЕ полил с утра."""
+    unwatered = await db.get_unwatered_overdue_users()
+    logger.info(f"Evening reminders: {len(unwatered)} users")
+
+    for user_id, plants in unwatered.items():
+        names = ", ".join(p.get("nickname") or p["name"] for p in plants[:3])
+        more = f" и ещё {len(plants)-3}" if len(plants) > 3 else ""
 
         try:
             await bot.send_message(
                 user_id,
-                "\n".join(lines),
+                f"🌙 *Вечернее напоминание*\n\n"
+                f"Сегодня ещё не политы: *{names}{more}*\n\n"
+                f"Успей до конца дня! 💧",
                 parse_mode="Markdown",
             )
         except Exception as e:
-            logger.warning(f"Failed to send reminder to {user_id}: {e}")
+            logger.warning(f"Evening reminder failed for {user_id}: {e}")
 
 
 def setup_scheduler(bot):
+    # Утреннее напоминание
     scheduler.add_job(
-        send_watering_reminders,
+        send_morning_reminders,
         CronTrigger(hour=REMINDER_HOUR, minute=0),
         args=[bot],
-        id="daily_watering_reminders",
+        id="morning_reminders",
+        replace_existing=True,
+    )
+    # Вечернее напоминание в 19:00
+    scheduler.add_job(
+        send_evening_reminders,
+        CronTrigger(hour=19, minute=0),
+        args=[bot],
+        id="evening_reminders",
         replace_existing=True,
     )
     scheduler.start()
-    logger.info(f"Scheduler started — reminders at {REMINDER_HOUR}:00 ({TIMEZONE})")
+    logger.info(f"Scheduler: утро {REMINDER_HOUR}:00, вечер 19:00 ({TIMEZONE})")
     return scheduler
