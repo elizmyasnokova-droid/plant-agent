@@ -1,8 +1,6 @@
 """
 Database layer — SQLite via aiosqlite.
-All functions are async.
 """
-import json
 import aiosqlite
 from datetime import datetime, timedelta
 from typing import Optional
@@ -25,24 +23,26 @@ async def init_db():
             );
 
             CREATE TABLE IF NOT EXISTS plants (
-                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id               INTEGER NOT NULL,
-                name                  TEXT    NOT NULL,
-                nickname              TEXT,
-                location              TEXT,
+                id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id                INTEGER NOT NULL,
+                name                   TEXT    NOT NULL,
+                nickname               TEXT,
+                location               TEXT,
                 watering_interval_days INTEGER DEFAULT 7,
-                last_watered          TEXT,
-                photo_file_id         TEXT,
-                notes                 TEXT,
-                created_at            TEXT DEFAULT (datetime('now')),
+                last_watered           TEXT,
+                photo_file_id          TEXT,
+                notes                  TEXT,
+                created_at             TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
 
-            CREATE TABLE IF NOT EXISTS watering_log (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                plant_id   INTEGER NOT NULL,
-                watered_at TEXT DEFAULT (datetime('now')),
-                notes      TEXT,
+            CREATE TABLE IF NOT EXISTS care_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                plant_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                action_type TEXT    NOT NULL,
+                notes       TEXT,
+                created_at  TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (plant_id) REFERENCES plants(id)
             );
 
@@ -112,7 +112,6 @@ async def add_plant(
 
 
 async def update_plant(plant_id: int, **fields) -> bool:
-    """Update any fields of a plant. Pass only fields that need updating."""
     allowed = {"name", "nickname", "location", "watering_interval_days", "notes", "photo_file_id"}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
@@ -136,7 +135,9 @@ async def water_plant(plant_id: int, notes: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE plants SET last_watered = ? WHERE id = ?", (now, plant_id))
         await db.execute(
-            "INSERT INTO watering_log (plant_id, notes) VALUES (?, ?)", (plant_id, notes)
+            "INSERT INTO care_log (plant_id, user_id, action_type, notes) "
+            "SELECT ?, user_id, 'полив', ? FROM plants WHERE id = ?",
+            (plant_id, notes, plant_id)
         )
         await db.commit()
 
@@ -144,7 +145,6 @@ async def water_plant(plant_id: int, notes: str = None):
 async def get_watering_schedule(user_id: int) -> dict:
     plants = await get_plants(user_id)
     now = datetime.now()
-
     overdue, today_list, upcoming = [], [], []
 
     for p in plants:
@@ -175,7 +175,6 @@ async def get_watering_schedule(user_id: int) -> dict:
 
 
 async def get_users_with_overdue_plants() -> list[int]:
-    """Return user_ids that have at least one overdue plant. Used by scheduler."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             """SELECT DISTINCT user_id FROM plants
@@ -184,6 +183,31 @@ async def get_users_with_overdue_plants() -> list[int]:
         ) as cursor:
             rows = await cursor.fetchall()
     return [r[0] for r in rows]
+
+
+# ─────────────────────────────────────────────
+# Care log
+# ─────────────────────────────────────────────
+
+async def log_care_action(plant_id: int, user_id: int, action_type: str, notes: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO care_log (plant_id, user_id, action_type, notes) VALUES (?, ?, ?, ?)",
+            (plant_id, user_id, action_type, notes)
+        )
+        await db.commit()
+
+
+async def get_care_history(plant_id: int, limit: int = 10) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT action_type, notes, created_at FROM care_log
+               WHERE plant_id = ? ORDER BY created_at DESC LIMIT ?""",
+            (plant_id, limit)
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
 
 
 # ─────────────────────────────────────────────
@@ -199,7 +223,6 @@ async def get_chat_history(user_id: int, limit: int = 20) -> list[dict]:
             (user_id, limit),
         ) as cursor:
             rows = await cursor.fetchall()
-    # Return chronologically
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
@@ -209,12 +232,10 @@ async def save_message(user_id: int, role: str, content: str):
             "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
             (user_id, role, content),
         )
-        # Keep last 50 messages per user
         await db.execute(
-            """DELETE FROM chat_history
-               WHERE user_id = ? AND id NOT IN (
-                   SELECT id FROM chat_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
-               )""",
+            """DELETE FROM chat_history WHERE user_id = ? AND id NOT IN (
+               SELECT id FROM chat_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
+            )""",
             (user_id, user_id),
         )
         await db.commit()
