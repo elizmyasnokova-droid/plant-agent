@@ -21,18 +21,24 @@ async def init_db():
             );
 
             CREATE TABLE IF NOT EXISTS plants (
-                id                     INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id                INTEGER NOT NULL,
-                name                   TEXT    NOT NULL,
-                nickname               TEXT,
-                location               TEXT,
-                watering_interval_days INTEGER DEFAULT 7,
-                last_watered           TEXT,
-                photo_file_id          TEXT,
-                notes                  TEXT,
-                created_at             TEXT DEFAULT (datetime('now')),
+                id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id                   INTEGER NOT NULL,
+                name                      TEXT    NOT NULL,
+                nickname                  TEXT,
+                location                  TEXT,
+                watering_interval_days    INTEGER DEFAULT 7,
+                last_watered              TEXT,
+                fertilizing_interval_days INTEGER DEFAULT 14,
+                last_fertilized           TEXT,
+                fertilizer_name           TEXT,
+                photo_file_id             TEXT,
+                notes                     TEXT,
+                created_at                TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
+
+            -- Добавляем колонки если их нет (миграция для существующих БД)
+            CREATE TABLE IF NOT EXISTS _migration_done (id INTEGER PRIMARY KEY);
 
             CREATE TABLE IF NOT EXISTS care_log (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,6 +59,18 @@ async def init_db():
             );
         """)
         await db.commit()
+
+        # Миграция — добавляем новые колонки в существующую БД
+        for col, definition in [
+            ("fertilizing_interval_days", "INTEGER DEFAULT 14"),
+            ("last_fertilized", "TEXT"),
+            ("fertilizer_name", "TEXT"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE plants ADD COLUMN {col} {definition}")
+                await db.commit()
+            except Exception:
+                pass  # Колонка уже есть
 
 
 # ─── Users ───
@@ -202,6 +220,95 @@ async def get_unwatered_overdue_users() -> dict[int, list[dict]]:
         if uid not in result:
             result[uid] = []
         result[uid].append(dict(r))
+    return result
+
+
+# ─── Fertilizing ───
+
+async def fertilize_plant(plant_id: int, fertilizer_name: str = None, notes: str = None):
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        if fertilizer_name:
+            await db.execute(
+                "UPDATE plants SET last_fertilized=?, fertilizer_name=? WHERE id=?",
+                (now, fertilizer_name, plant_id)
+            )
+        else:
+            await db.execute("UPDATE plants SET last_fertilized=? WHERE id=?", (now, plant_id))
+        await db.execute(
+            "INSERT INTO care_log (plant_id, user_id, action_type, notes) "
+            "SELECT ?, user_id, 'удобрение', ? FROM plants WHERE id=?",
+            (plant_id, notes or fertilizer_name, plant_id)
+        )
+        await db.commit()
+
+
+async def set_fertilizing_schedule(plant_id: int, interval_days: int, fertilizer_name: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        if fertilizer_name:
+            await db.execute(
+                "UPDATE plants SET fertilizing_interval_days=?, fertilizer_name=? WHERE id=?",
+                (interval_days, fertilizer_name, plant_id)
+            )
+        else:
+            await db.execute(
+                "UPDATE plants SET fertilizing_interval_days=? WHERE id=?",
+                (interval_days, plant_id)
+            )
+        await db.commit()
+
+
+async def get_fertilizing_schedule(user_id: int) -> dict:
+    plants = await get_plants(user_id)
+    now = datetime.now()
+    overdue, today_list, upcoming = [], [], []
+
+    for p in plants:
+        interval = p.get("fertilizing_interval_days") or 14
+        last_raw = p.get("last_fertilized")
+
+        if not last_raw:
+            overdue.append({**p, "status": "ещё не удобрялось"})
+            continue
+
+        try:
+            last = datetime.fromisoformat(last_raw)
+        except ValueError:
+            continue
+
+        diff = ((last + timedelta(days=interval)).date() - now.date()).days
+
+        if diff < 0:
+            overdue.append({**p, "days_overdue": abs(diff)})
+        elif diff == 0:
+            today_list.append(p)
+        elif diff <= 3:
+            upcoming.append({**p, "days_until": diff})
+
+    return {"overdue": overdue, "today": today_list, "upcoming_3_days": upcoming}
+
+
+async def get_users_with_overdue_fertilizing() -> dict[int, list[dict]]:
+    """Пользователи у которых пора удобрять растения."""
+    plants_list = []
+    import aiosqlite as _aio
+    async with _aio.connect(DB_PATH) as db:
+        db.row_factory = _aio.Row
+        async with db.execute(
+            """SELECT * FROM plants
+               WHERE fertilizing_interval_days IS NOT NULL
+               AND (last_fertilized IS NULL
+               OR datetime(last_fertilized,'+'||fertilizing_interval_days||' days')<=datetime('now'))"""
+        ) as cursor:
+            rows = await cursor.fetchall()
+        plants_list = [dict(r) for r in rows]
+
+    result: dict[int, list] = {}
+    for p in plants_list:
+        uid = p["user_id"]
+        if uid not in result:
+            result[uid] = []
+        result[uid].append(p)
     return result
 
 
