@@ -110,6 +110,36 @@ async def send_weekly_tips(bot):
             logger.warning(f"Weekly tip failed for {user_id}: {e}")
 
 
+async def send_fertilizing_reminders(bot):
+    """Напоминание об удобрениях — каждый вторник."""
+    user_plants = await db.get_users_with_overdue_fertilizing()
+    logger.info(f"Fertilizing reminders: {len(user_plants)} users")
+
+    for user_id, plants in user_plants.items():
+        lines = ["🌱 *Пора удобрить растения!*\n"]
+        for p in plants:
+            name = p.get("nickname") or p["name"]
+            fertilizer = p.get("fertilizer_name")
+            fert_str = f" — используй *{fertilizer}*" if fertilizer else ""
+            last_raw = p.get("last_fertilized")
+            if last_raw:
+                from datetime import datetime as dt
+                try:
+                    days_ago = (dt.now() - dt.fromisoformat(last_raw)).days
+                    lines.append(f"  🌿 {name}{fert_str} (последний раз {days_ago} дн. назад)")
+                except Exception:
+                    lines.append(f"  🌿 {name}{fert_str}")
+            else:
+                lines.append(f"  🌿 {name}{fert_str} (ещё не удобрялось)")
+
+        lines.append("\nНапиши «удобрила [растение]» после того как сделаешь ✅")
+
+        try:
+            await bot.send_message(user_id, "\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"Fertilizing reminder failed for {user_id}: {e}")
+
+
 def setup_scheduler(bot):
     # Утреннее напоминание
     scheduler.add_job(
@@ -127,6 +157,14 @@ def setup_scheduler(bot):
         id="evening_reminders",
         replace_existing=True,
     )
+    # Напоминания об удобрениях — каждый вторник в 10:00
+    scheduler.add_job(
+        send_fertilizing_reminders,
+        CronTrigger(day_of_week="tue", hour=10, minute=0),
+        args=[bot],
+        id="fertilizing_reminders",
+        replace_existing=True,
+    )
     # Еженедельные советы — каждое воскресенье в 10:00
     scheduler.add_job(
         send_weekly_tips,
@@ -136,5 +174,5 @@ def setup_scheduler(bot):
         replace_existing=True,
     )
     scheduler.start()
-    logger.info(f"Scheduler: утро {REMINDER_HOUR}:00, вечер 19:00, советы вс 10:00 ({TIMEZONE})")
+    logger.info(f"Scheduler: утро {REMINDER_HOUR}:00, вечер 19:00, удобрения вт 10:00, советы вс 10:00 ({TIMEZONE})")
     return scheduler
