@@ -1,5 +1,5 @@
 """
-🌿 Plant Agent Bot v2.0
+🌿 Plant Agent Bot v2.1
 """
 import asyncio
 import base64
@@ -15,7 +15,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand, CallbackQuery, InlineKeyboardButton,
-    InlineKeyboardMarkup, Message
+    InlineKeyboardMarkup, KeyboardButton, Message,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -23,6 +24,7 @@ import database as db
 from agent import chat
 from config import TELEGRAM_TOKEN
 from scheduler import setup_scheduler
+from weather import get_weather
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -31,9 +33,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 
-# ─────────────────────────────────────────────
-# FSM — пошаговое добавление растения
-# ─────────────────────────────────────────────
+# ─── FSM ───
 
 class AddPlant(StatesGroup):
     name = State()
@@ -42,9 +42,7 @@ class AddPlant(StatesGroup):
     interval = State()
 
 
-# ─────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────
+# ─── Helpers ───
 
 async def agent_reply(message: Message, user_text: str, image_b64: str = None):
     await bot.send_chat_action(message.chat.id, "typing")
@@ -61,7 +59,6 @@ async def agent_reply(message: Message, user_text: str, image_b64: str = None):
 
 
 def plant_keyboard(plant_id: int) -> InlineKeyboardMarkup:
-    """Кнопки под карточкой растения."""
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="💧 Полил", callback_data=f"water_{plant_id}"))
     builder.add(InlineKeyboardButton(text="📔 Журнал", callback_data=f"journal_{plant_id}"))
@@ -70,9 +67,7 @@ def plant_keyboard(plant_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-# ─────────────────────────────────────────────
-# Команды
-# ─────────────────────────────────────────────
+# ─── Команды ───
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -81,12 +76,12 @@ async def cmd_start(message: Message, state: FSMContext):
     name = message.from_user.first_name or "друг"
     await message.answer(
         f"🌿 Привет, {name}! Я твой персональный ботаник.\n\n"
-        "📸 *Фото* — определю растение, найду проблемы, сохраню в коллекцию\n"
-        "💧 *Напоминания* — скажу когда поливать\n"
-        "🔍 *Советы* — научно обоснованный уход\n"
-        "🌡️ *Диагностика* — болезни и вредители\n"
-        "📔 *Журнал* — история ухода за каждым растением\n\n"
-        "Команды: /plants · /add · /schedule · /help",
+        "📸 *Фото* — определю растение, найду проблемы\n"
+        "💧 *Напоминания* — утром и вечером если не полил\n"
+        "🌤️ *Погода* — советы с учётом температуры\n"
+        "📊 *Статистика* — твой прогресс в уходе\n"
+        "📔 *Журнал* — история каждого растения\n\n"
+        "Команды: /plants · /add · /schedule · /stats · /weather · /help",
         parse_mode="Markdown",
     )
 
@@ -94,18 +89,18 @@ async def cmd_start(message: Message, state: FSMContext):
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
-        "🌿 *Как пользоваться ботом*\n\n"
-        "📸 *Пришли фото* — определю вид, найду проблемы\n\n"
-        "💬 *Примеры:*\n"
-        "• «Добавь мою монстеру, поливаю раз в 7 дней»\n"
+        "🌿 *Команды бота*\n\n"
+        "/plants — список растений с фото и кнопками\n"
+        "/add — добавить растение пошагово\n"
+        "/schedule — расписание полива\n"
+        "/stats — твоя статистика\n"
+        "/weather — погода и советы по поливу\n"
+        "/help — эта справка\n\n"
+        "💬 *Просто пиши:*\n"
         "• «Полил орхидею»\n"
         "• «Удобрил фикус»\n"
         "• «Почему желтеют листья?»\n\n"
-        "📋 *Команды:*\n"
-        "/plants — список с фото и кнопками\n"
-        "/add — добавить растение пошагово\n"
-        "/schedule — расписание полива\n"
-        "/help — эта справка",
+        "📸 Пришли фото — определю вид и найду проблемы",
         parse_mode="Markdown",
     )
 
@@ -118,8 +113,7 @@ async def cmd_plants(message: Message, state: FSMContext):
 
     if not plants:
         await message.answer(
-            "🌱 У тебя пока нет растений.\n\n"
-            "Используй /add чтобы добавить, или просто напиши мне!"
+            "🌱 У тебя пока нет растений.\n\nИспользуй /add или просто напиши мне!"
         )
         return
 
@@ -138,13 +132,7 @@ async def cmd_plants(message: Message, state: FSMContext):
         else:
             last = "никогда"
 
-        caption = (
-            f"*{i}. {name}*\n"
-            f"{location}"
-            f"💧 Полив: {last}\n"
-            f"🔄 Каждые {interval} дн."
-        )
-
+        caption = f"*{i}. {name}*\n{location}💧 Полив: {last}\n🔄 Каждые {interval} дн."
         kb = plant_keyboard(p["id"])
 
         if p.get("photo_file_id"):
@@ -153,8 +141,7 @@ async def cmd_plants(message: Message, state: FSMContext):
                                      caption=caption, parse_mode="Markdown", reply_markup=kb)
                 continue
             except Exception as e:
-                logger.warning(f"Photo send error: {e}")
-
+                logger.warning(f"Photo error: {e}")
         await message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
 
@@ -162,67 +149,121 @@ async def cmd_plants(message: Message, state: FSMContext):
 async def cmd_schedule(message: Message, state: FSMContext):
     await state.clear()
     await db.ensure_user(message.from_user.id)
-    await agent_reply(message,
-        "Покажи расписание полива. Что просрочено, что нужно полить сегодня и что скоро?")
+    await agent_reply(message, "Покажи расписание полива. Что просрочено, сегодня и скоро?")
 
 
-# ─────────────────────────────────────────────
-# FSM /add — пошаговое добавление
-# ─────────────────────────────────────────────
+@dp.message(Command("weather"))
+async def cmd_weather(message: Message):
+    await db.ensure_user(message.from_user.id)
+    loc = await db.get_user_location(message.from_user.id)
+
+    if loc:
+        weather = await get_weather(loc[0], loc[1])
+    else:
+        weather = await get_weather()
+
+    temp = weather.get("temperature")
+    summary = weather.get("summary", "данные недоступны")
+    advice = weather.get("watering_advice", "")
+
+    location_note = "" if loc else "\n\n💡 _Отправь свою геолокацию для точной погоды:\nскрепка 📎 → Геолокация_"
+
+    await message.answer(
+        f"🌤️ *Погода сейчас*\n\n"
+        f"🌡️ {summary}\n\n"
+        f"{advice}{location_note}",
+        parse_mode="Markdown",
+    )
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    await db.ensure_user(message.from_user.id)
+    stats = await db.get_user_stats(message.from_user.id)
+
+    total = stats["total_plants"]
+    watered_today = stats["watered_today"]
+    streak = stats["watering_streak"]
+    tenure = stats["tenure_days"]
+    total_actions = stats["total_actions"]
+
+    # Эмодзи для стрика
+    if streak >= 30:
+        streak_icon = "🏆"
+    elif streak >= 14:
+        streak_icon = "🔥"
+    elif streak >= 7:
+        streak_icon = "⭐"
+    elif streak >= 3:
+        streak_icon = "✨"
+    else:
+        streak_icon = "🌱"
+
+    # Стаж
+    if tenure >= 365:
+        tenure_str = f"{tenure // 365} г. {(tenure % 365) // 30} мес."
+    elif tenure >= 30:
+        tenure_str = f"{tenure // 30} мес."
+    elif tenure > 0:
+        tenure_str = f"{tenure} дн."
+    else:
+        tenure_str = "сегодня начали!"
+
+    await message.answer(
+        f"📊 *Твоя статистика*\n\n"
+        f"🌿 Растений в коллекции: *{total}*\n"
+        f"💧 Полито сегодня: *{watered_today}/{total}*\n"
+        f"{streak_icon} Стрик полива: *{streak} дн.*\n"
+        f"📋 Всего действий ухода: *{total_actions}*\n"
+        f"⏱ Ты с нами: *{tenure_str}*",
+        parse_mode="Markdown",
+    )
+
+
+# ─── FSM /add ───
 
 @dp.message(Command("add"))
 async def cmd_add(message: Message, state: FSMContext):
     await state.set_state(AddPlant.name)
     await message.answer(
-        "🌱 *Добавляем новое растение!*\n\n"
-        "Шаг 1/4 — Как называется растение?\n"
-        "_(например: Монстера, Фикус, Орхидея)_",
+        "🌱 *Добавляем растение!*\n\n"
+        "Шаг 1/4 — Как называется?\n_(Монстера, Фикус, Орхидея...)_",
         parse_mode="Markdown",
     )
 
 
 @dp.message(AddPlant.name)
-async def add_plant_name(message: Message, state: FSMContext):
+async def add_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text)
     await state.set_state(AddPlant.nickname)
     await message.answer(
-        f"✅ *{message.text}* — отлично!\n\n"
-        "Шаг 2/4 — Дашь ему имя/прозвище?\n"
-        "_(например: Мася, Зелёный друг, или напиши «нет»)_",
+        f"✅ *{message.text}*\n\nШаг 2/4 — Дашь прозвище?\n_(или напиши «нет»)_",
         parse_mode="Markdown",
     )
 
 
 @dp.message(AddPlant.nickname)
-async def add_plant_nickname(message: Message, state: FSMContext):
+async def add_nickname(message: Message, state: FSMContext):
     nickname = None if message.text.lower() in ("нет", "no", "-") else message.text
     await state.update_data(nickname=nickname)
     await state.set_state(AddPlant.location)
-    await message.answer(
-        "Шаг 3/4 — Где стоит растение?\n"
-        "_(например: подоконник, рабочий стол, балкон, или «нет»)_",
-        parse_mode="Markdown",
-    )
+    await message.answer("Шаг 3/4 — Где стоит?\n_(подоконник, балкон, стол... или «нет»)_", parse_mode="Markdown")
 
 
 @dp.message(AddPlant.location)
-async def add_plant_location(message: Message, state: FSMContext):
+async def add_location(message: Message, state: FSMContext):
     location = None if message.text.lower() in ("нет", "no", "-") else message.text
     await state.update_data(location=location)
     await state.set_state(AddPlant.interval)
-    await message.answer(
-        "Шаг 4/4 — Как часто поливать? (в днях)\n"
-        "_(например: 7 — раз в неделю, 3 — каждые 3 дня)_",
-        parse_mode="Markdown",
-    )
+    await message.answer("Шаг 4/4 — Как часто поливать? (в днях)\n_(например: 7)_", parse_mode="Markdown")
 
 
 @dp.message(AddPlant.interval)
-async def add_plant_interval(message: Message, state: FSMContext):
+async def add_interval(message: Message, state: FSMContext):
     try:
         interval = int(message.text.strip())
     except ValueError:
-        await message.answer("⚠️ Введи число дней, например: 7")
+        await message.answer("⚠️ Введи число, например: 7")
         return
 
     data = await state.get_data()
@@ -239,17 +280,15 @@ async def add_plant_interval(message: Message, state: FSMContext):
     name = data.get("nickname") or data["name"]
     loc = f" ({data['location']})" if data.get("location") else ""
     await message.answer(
-        f"✅ *{name}*{loc} добавлен в коллекцию!\n\n"
-        f"💧 Напомню о поливе через {interval} дней.\n\n"
-        f"Пришли фото растения чтобы сохранить его в карточку 📸",
+        f"✅ *{name}*{loc} добавлен!\n\n"
+        f"💧 Напомню через {interval} дней.\n"
+        f"📸 Пришли фото — сохраню в карточку!",
         parse_mode="Markdown",
         reply_markup=plant_keyboard(plant_id),
     )
 
 
-# ─────────────────────────────────────────────
-# Callback — кнопки под карточкой
-# ─────────────────────────────────────────────
+# ─── Callbacks ───
 
 @dp.callback_query(F.data.startswith("water_"))
 async def cb_water(callback: CallbackQuery):
@@ -258,15 +297,12 @@ async def cb_water(callback: CallbackQuery):
     if not plant:
         await callback.answer("Растение не найдено", show_alert=True)
         return
-
     await db.water_plant(plant_id)
     name = plant.get("nickname") or plant["name"]
     interval = plant.get("watering_interval_days", 7)
-
     await callback.answer(f"💧 {name} полит!")
     await callback.message.answer(
-        f"💧 *{name}* полит!\n"
-        f"Следующий полив через {interval} дней 🗓",
+        f"💧 *{name}* полит!\nСледующий полив через {interval} дней 🗓",
         parse_mode="Markdown",
     )
 
@@ -278,33 +314,25 @@ async def cb_journal(callback: CallbackQuery):
     if not plant:
         await callback.answer("Растение не найдено", show_alert=True)
         return
-
-    history = await db.get_care_history(plant_id, limit=10)
+    history = await db.get_care_history(plant_id)
     name = plant.get("nickname") or plant["name"]
-
     await callback.answer()
-
     if not history:
         await callback.message.answer(
             f"📔 Журнал *{name}*\n\nЗаписей пока нет.\n"
-            "Напиши мне «удобрил {name}» или «пересадил {name}» — запишу!",
-            parse_mode="Markdown",
+            "Напиши «удобрил» или «пересадил» — запишу!", parse_mode="Markdown"
         )
         return
-
-    ICONS = {"полив": "💧", "удобрение": "🌱", "пересадка": "🪴",
-              "обрезка": "✂️", "лечение": "💊", "заметка": "📝"}
-
+    ICONS = {"полив": "💧", "удобрение": "🌱", "пересадка": "🪴", "обрезка": "✂️", "лечение": "💊", "заметка": "📝"}
     lines = [f"📔 *Журнал {name}:*\n"]
-    for entry in history:
+    for e in history:
         try:
-            dt = datetime.fromisoformat(entry["created_at"]).strftime("%d.%m.%Y")
+            dt = datetime.fromisoformat(e["created_at"]).strftime("%d.%m.%Y")
         except Exception:
-            dt = entry["created_at"][:10]
-        icon = ICONS.get(entry["action_type"], "•")
-        note = f" — {entry['notes']}" if entry.get("notes") else ""
-        lines.append(f"{icon} {dt} {entry['action_type']}{note}")
-
+            dt = e["created_at"][:10]
+        icon = ICONS.get(e["action_type"], "•")
+        note = f" — {e['notes']}" if e.get("notes") else ""
+        lines.append(f"{icon} {dt} {e['action_type']}{note}")
     await callback.message.answer("\n".join(lines), parse_mode="Markdown")
 
 
@@ -315,12 +343,10 @@ async def cb_edit(callback: CallbackQuery):
     if not plant:
         await callback.answer("Растение не найдено", show_alert=True)
         return
-
     name = plant.get("nickname") or plant["name"]
     await callback.answer()
     await callback.message.answer(
         f"✏️ Что изменить у *{name}*?\n\n"
-        "Напиши мне, например:\n"
         f"• «Измени интервал полива {name} на 5 дней»\n"
         f"• «Переименуй {name} в Васю»\n"
         f"• «{name} переехал на балкон»",
@@ -328,9 +354,26 @@ async def cb_edit(callback: CallbackQuery):
     )
 
 
-# ─────────────────────────────────────────────
-# Фото
-# ─────────────────────────────────────────────
+# ─── Геолокация ───
+
+@dp.message(F.location)
+async def handle_location(message: Message):
+    await db.ensure_user(message.from_user.id)
+    lat = message.location.latitude
+    lon = message.location.longitude
+    await db.save_user_location(message.from_user.id, lat, lon)
+
+    weather = await get_weather(lat, lon)
+    await message.answer(
+        f"📍 Локация сохранена!\n\n"
+        f"🌤️ *Погода у тебя:* {weather.get('summary', 'недоступно')}\n\n"
+        f"{weather.get('watering_advice', '')}\n\n"
+        f"Теперь советы по поливу будут учитывать твою погоду 🌿",
+        parse_mode="Markdown",
+    )
+
+
+# ─── Фото ───
 
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
@@ -349,74 +392,52 @@ async def handle_photo(message: Message, state: FSMContext):
         if caption else
         f"[photo_file_id: {photo.file_id}]\nЧто это за растение? Есть ли признаки болезней?"
     )
-
     await agent_reply(message, user_text, image_b64=image_b64)
 
 
-# ─────────────────────────────────────────────
-# Голосовые сообщения
-# ─────────────────────────────────────────────
+# ─── Голос ───
 
 @dp.message(F.voice)
 async def handle_voice(message: Message, state: FSMContext):
     await state.clear()
     await db.ensure_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-
     try:
         import speech_recognition as sr
         from pydub import AudioSegment
 
         await bot.send_chat_action(message.chat.id, "typing")
-
-        # Скачиваем OGG файл
         file = await bot.get_file(message.voice.file_id)
         file_bytes = await bot.download_file(file.file_path)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             ogg_path = os.path.join(tmpdir, "voice.ogg")
             wav_path = os.path.join(tmpdir, "voice.wav")
-
             with open(ogg_path, "wb") as f:
                 f.write(file_bytes.read())
-
-            # Конвертируем OGG → WAV
-            audio = AudioSegment.from_ogg(ogg_path)
-            audio.export(wav_path, format="wav")
-
-            # Распознаём речь
+            AudioSegment.from_ogg(ogg_path).export(wav_path, format="wav")
             recognizer = sr.Recognizer()
             with sr.AudioFile(wav_path) as source:
                 audio_data = recognizer.record(source)
             text = recognizer.recognize_google(audio_data, language="ru-RU")
 
-        await message.answer(f"🎙️ _Распознал: «{text}»_", parse_mode="Markdown")
+        await message.answer(f"🎙️ _«{text}»_", parse_mode="Markdown")
         await agent_reply(message, text)
-
     except Exception as e:
-        logger.warning(f"Voice recognition failed: {e}")
-        await message.answer(
-            "🎙️ Не смог распознать голосовое сообщение.\n"
-            "Напиши текстом — отвечу быстро! 💬"
-        )
+        logger.warning(f"Voice failed: {e}")
+        await message.answer("🎙️ Не смог распознать. Напиши текстом! 💬")
 
 
-# ─────────────────────────────────────────────
-# Текст
-# ─────────────────────────────────────────────
+# ─── Текст ───
 
 @dp.message(F.text)
 async def handle_text(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is not None:
-        return  # FSM обрабатывает сам
-
+    if await state.get_state() is not None:
+        return
     await db.ensure_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     await agent_reply(message, message.text)
 
 
-# ─────────────────────────────────────────────
-# Startup
-# ─────────────────────────────────────────────
+# ─── Startup ───
 
 async def set_bot_commands():
     await bot.set_my_commands([
@@ -424,6 +445,8 @@ async def set_bot_commands():
         BotCommand(command="plants", description="🌿 Мои растения"),
         BotCommand(command="add", description="➕ Добавить растение"),
         BotCommand(command="schedule", description="💧 Расписание полива"),
+        BotCommand(command="weather", description="🌤️ Погода и советы"),
+        BotCommand(command="stats", description="📊 Моя статистика"),
         BotCommand(command="help", description="Помощь"),
     ])
 
@@ -432,7 +455,7 @@ async def main():
     await db.init_db()
     await set_bot_commands()
     setup_scheduler(bot)
-    logger.info("🌿 Plant Agent Bot v2.0 started!")
+    logger.info("🌿 Plant Agent Bot v2.1 started!")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
