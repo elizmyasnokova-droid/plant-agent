@@ -67,6 +67,49 @@ async def send_evening_reminders(bot):
             logger.warning(f"Evening reminder failed for {user_id}: {e}")
 
 
+async def send_weekly_tips(bot):
+    """Каждое воскресенье — персональные советы по уходу для каждого растения."""
+    from anthropic import AsyncAnthropic
+    client = AsyncAnthropic()
+
+    user_ids = await db.get_users_with_overdue_plants.__wrapped__() if hasattr(db.get_users_with_overdue_plants, '__wrapped__') else None
+
+    # Берём всех пользователей у которых есть растения
+    import aiosqlite
+    from config import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as conn:
+        async with conn.execute("SELECT DISTINCT user_id FROM plants") as cursor:
+            all_users = [r[0] for r in await cursor.fetchall()]
+
+    logger.info(f"Weekly tips: {len(all_users)} users")
+
+    for user_id in all_users:
+        plants = await db.get_plants(user_id)
+        if not plants:
+            continue
+
+        names = ", ".join(p.get("nickname") or p["name"] for p in plants[:5])
+        try:
+            response = await client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Ты — бот Flora, помощник по растениям. "
+                        f"У пользователя есть растения: {names}. "
+                        f"Напиши короткий дружелюбный совет на эту неделю — "
+                        f"что важно сделать с учётом текущего сезона (конец мая). "
+                        f"Конкретно, 3-4 пункта, с эмодзи. Начни с '🌿 Совет недели от Flora:'"
+                    )
+                }]
+            )
+            tip = response.content[0].text
+            await bot.send_message(user_id, tip, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"Weekly tip failed for {user_id}: {e}")
+
+
 def setup_scheduler(bot):
     # Утреннее напоминание
     scheduler.add_job(
@@ -84,6 +127,14 @@ def setup_scheduler(bot):
         id="evening_reminders",
         replace_existing=True,
     )
+    # Еженедельные советы — каждое воскресенье в 10:00
+    scheduler.add_job(
+        send_weekly_tips,
+        CronTrigger(day_of_week="sun", hour=10, minute=0),
+        args=[bot],
+        id="weekly_tips",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info(f"Scheduler: утро {REMINDER_HOUR}:00, вечер 19:00 ({TIMEZONE})")
+    logger.info(f"Scheduler: утро {REMINDER_HOUR}:00, вечер 19:00, советы вс 10:00 ({TIMEZONE})")
     return scheduler
