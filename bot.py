@@ -46,12 +46,14 @@ class AddPlant(StatesGroup):
 
 async def agent_reply(message: Message, user_text: str, image_b64: str = None):
     await bot.send_chat_action(message.chat.id, "typing")
-    history = await db.get_chat_history(message.from_user.id)
+    history = await db.get_chat_history(message.from_user.id, limit=50)
+    user_name = message.from_user.first_name or message.from_user.username or "друг"
     response = await chat(
         user_id=message.from_user.id,
         message=user_text,
         history=history,
         image_base64=image_b64,
+        user_name=user_name,
     )
     await db.save_message(message.from_user.id, "user", user_text)
     await db.save_message(message.from_user.id, "assistant", response)
@@ -221,6 +223,114 @@ async def cmd_stats(message: Message):
 
 
 # ─── FSM /add ───
+
+@dp.message(Command("history"))
+async def cmd_history(message: Message):
+    await db.ensure_user(message.from_user.id)
+    plants = await db.get_plants(message.from_user.id)
+
+    if not plants:
+        await message.answer("🌱 У тебя пока нет растений. Добавь через /add!")
+        return
+
+    if len(plants) == 1:
+        await send_health_chart(message, plants[0])
+        return
+
+    lines = ["📈 *История здоровья — выбери растение:*\n"]
+    for i, p in enumerate(plants, 1):
+        name = p.get("nickname") or p["name"]
+        latest = await db.get_latest_health(p["id"])
+        if latest:
+            score = latest["score"]
+            stars = "⭐" * score + "☆" * (5 - score)
+            lines.append(f"{i}. {name} — {stars}")
+        else:
+            lines.append(f"{i}. {name} — нет записей")
+
+    lines.append("\nНапиши номер растения")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+async def send_health_chart(message: Message, plant: dict):
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    history = await db.get_health_history(plant["id"], days=90)
+    name = plant.get("nickname") or plant["name"]
+
+    if not history:
+        text = "📈 У *" + name + "* пока нет записей о здоровье.\n\nFlora автоматически записывает состояние когда ты присылаешь фото!"
+        await message.answer(text, parse_mode="Markdown")
+        return
+
+    dates, scores = [], []
+    for entry in history:
+        try:
+            dates.append(datetime.fromisoformat(entry["created_at"]))
+            scores.append(entry["score"])
+        except Exception:
+            continue
+
+    if not dates:
+        await message.answer("Нет данных для графика.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.patch.set_facecolor("#1a1a2e")
+    ax.set_facecolor("#16213e")
+
+    ax.plot(dates, scores, color="#4ade80", linewidth=2.5, zorder=3)
+    ax.fill_between(dates, scores, 1, alpha=0.2, color="#4ade80")
+
+    colors = {1: "#ef4444", 2: "#f97316", 3: "#eab308", 4: "#84cc16", 5: "#22c55e"}
+    for d, s in zip(dates, scores):
+        ax.scatter(d, s, color=colors.get(s, "#4ade80"), s=80, zorder=5)
+
+    labels_map = {1: "Критично", 2: "Плохо", 3: "Средне", 4: "Хорошо", 5: "Отлично"}
+    for i in range(1, 6):
+        ax.axhline(y=i, color="#ffffff", alpha=0.05, linewidth=0.5)
+
+    ax.set_yticks(range(1, 6))
+    ax.set_yticklabels([str(i) + " — " + labels_map[i] for i in range(1, 6)], color="#9ca3af", fontsize=9)
+    ax.set_ylim(0.5, 5.5)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+    ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+    plt.setp(ax.get_xticklabels(), color="#9ca3af", fontsize=9)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#374151")
+
+    title = "📈 История здоровья — " + name
+    ax.set_title(title, color="#f9fafb", fontsize=14, pad=15, fontweight="bold")
+    ax.set_xlabel("Дата", color="#9ca3af", fontsize=10)
+    ax.tick_params(colors="#9ca3af")
+    fig.tight_layout(pad=2)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    buf.seek(0)
+    plt.close(fig)
+
+    score = history[-1]["score"]
+    stars = "⭐" * score + "☆" * (5 - score)
+    trend = ""
+    if len(scores) >= 2:
+        diff = scores[-1] - scores[-2]
+        trend = " 📈" if diff > 0 else (" 📉" if diff < 0 else " ➡️")
+
+    caption = "📈 *" + name + "* — история за 90 дней\n\nСостояние: " + stars + trend + "\nЗаписей: " + str(len(history))
+
+    from aiogram.types import BufferedInputFile
+    await bot.send_photo(
+        message.chat.id,
+        photo=BufferedInputFile(buf.read(), filename="health.png"),
+        caption=caption,
+        parse_mode="Markdown"
+    )
+
 
 @dp.message(Command("add"))
 async def cmd_add(message: Message, state: FSMContext):
