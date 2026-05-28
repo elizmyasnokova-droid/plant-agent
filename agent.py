@@ -212,6 +212,9 @@ async def execute_tool(name: str, input_data: dict) -> str:
 async def chat(user_id: int, message: str, history: list[dict],
                image_base64: str = None, image_media_type: str = "image/jpeg") -> str:
 
+    # user_id в системный промпт — агент всегда знает с кем работает
+    system = SYSTEM_PROMPT + "\n\n[ТЕКУЩИЙ ПОЛЬЗОВАТЕЛЬ: user_id=" + str(user_id) + ". Используй этот ID во всех инструментах где нужен user_id.]"
+
     if image_base64:
         user_content = [
             {"type": "image", "source": {"type": "base64", "media_type": image_media_type, "data": image_base64}},
@@ -226,7 +229,7 @@ async def chat(user_id: int, message: str, history: list[dict],
         response = await client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=2048,
-            system=SYSTEM_PROMPT,
+            system=system,
             tools=TOOLS,
             messages=messages,
         )
