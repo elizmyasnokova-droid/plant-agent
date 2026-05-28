@@ -50,6 +50,16 @@ async def init_db():
                 FOREIGN KEY (plant_id) REFERENCES plants(id)
             );
 
+            CREATE TABLE IF NOT EXISTS health_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                plant_id   INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                score      INTEGER NOT NULL,
+                notes      TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (plant_id) REFERENCES plants(id)
+            );
+
             CREATE TABLE IF NOT EXISTS chat_history (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id    INTEGER NOT NULL,
@@ -398,28 +408,121 @@ async def get_user_stats(user_id: int) -> dict:
     }
 
 
-# ─── Chat history ───
+# ─── Health log ───
 
-async def get_chat_history(user_id: int, limit: int = 20) -> list[dict]:
+async def log_health(plant_id: int, user_id: int, score: int, notes: str = None):
+    """Записать состояние здоровья растения. score: 1-5."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO health_log (plant_id, user_id, score, notes) VALUES (?,?,?,?)",
+            (plant_id, user_id, score, notes)
+        )
+        await db.commit()
+
+
+async def get_health_history(plant_id: int, days: int = 90) -> list[dict]:
+    """История здоровья за последние N дней."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT role, content FROM chat_history WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-            (user_id, limit),
+            """SELECT score, notes, created_at FROM health_log
+               WHERE plant_id=?
+               AND created_at >= datetime('now', '-' || ? || ' days')
+               ORDER BY created_at ASC""",
+            (plant_id, days)
         ) as cursor:
             rows = await cursor.fetchall()
-    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    return [dict(r) for r in rows]
+
+
+async def get_latest_health(plant_id: int) -> Optional[dict]:
+    """Последняя запись здоровья."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT score, notes, created_at FROM health_log WHERE plant_id=? ORDER BY created_at DESC LIMIT 1",
+            (plant_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+# ─── Chat history ───
+
+async def get_chat_history(user_id: int, limit: int = 50) -> list[dict]:
+    """
+    Умная выборка истории:
+    — последние 50 сообщений (текущий контекст)
+    — + важные старые: добавление растений, диагнозы, первое сообщение
+    Всё хранится безлимитно, в контекст идёт самое нужное.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Последние N сообщений — основной контекст
+        async with db.execute(
+            "SELECT id, role, content FROM chat_history WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit),
+        ) as cursor:
+            recent_rows = await cursor.fetchall()
+
+        # Важные старые сообщения (содержат ключевые слова)
+        keywords = "добав%,болезн%,диагноз%,пересад%,лечени%,умира%,спас%,фото%,определ%"
+        placeholders = ",".join(["?" for _ in keywords.split(",")])
+        like_clauses = " OR ".join(["content LIKE ?" for _ in keywords.split(",")])
+        like_values = [k for k in keywords.split(",")]
+
+        async with db.execute(
+            f"""SELECT id, role, content FROM chat_history
+               WHERE user_id=? AND ({like_clauses})
+               AND id NOT IN (SELECT id FROM chat_history WHERE user_id=? ORDER BY created_at DESC LIMIT ?)
+               ORDER BY created_at ASC LIMIT 20""",
+            [user_id] + like_values + [user_id, limit],
+        ) as cursor:
+            important_rows = await cursor.fetchall()
+
+    # Собираем: важные старые + разделитель + свежие (без дублей)
+    recent_ids = {r["id"] for r in recent_rows}
+    result = []
+
+    if important_rows:
+        for r in important_rows:
+            if r["id"] not in recent_ids:
+                result.append({"role": r["role"], "content": r["content"]})
+        # Разделитель чтобы агент понимал что это старый контекст
+        if result:
+            result.append({
+                "role": "user",
+                "content": "[--- выше: важные моменты из прошлых разговоров ---]"
+            })
+            result.append({"role": "assistant", "content": "Понял, учту весь контекст."})
+
+    for r in reversed(recent_rows):
+        result.append({"role": r["role"], "content": r["content"]})
+
+    return result
+
+
+async def get_chat_stats(user_id: int) -> dict:
+    """Статистика переписки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM chat_history WHERE user_id=?", (user_id,)
+        ) as c:
+            total = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT MIN(created_at), MAX(created_at) FROM chat_history WHERE user_id=?", (user_id,)
+        ) as c:
+            row = await c.fetchone()
+            first, last = (row[0], row[1]) if row else (None, None)
+    return {"total_messages": total, "first_message": first, "last_message": last}
 
 
 async def save_message(user_id: int, role: str, content: str):
+    """Сохранить сообщение. Хранение БЕЗЛИМИТНОЕ — ничего не удаляется."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO chat_history (user_id, role, content) VALUES (?,?,?)",
             (user_id, role, content),
-        )
-        await db.execute(
-            """DELETE FROM chat_history WHERE user_id=? AND id NOT IN (
-               SELECT id FROM chat_history WHERE user_id=? ORDER BY created_at DESC LIMIT 50)""",
-            (user_id, user_id),
         )
         await db.commit()
