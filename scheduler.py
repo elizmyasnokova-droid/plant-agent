@@ -12,8 +12,26 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 
+async def _get_smart_watering_tip(temp):
+    """Вернуть иконку погоды и совет по поливу на основе температуры."""
+    if temp is None:
+        return "🌤️", ""
+    if temp >= 32:
+        return "🌡️🔥", "*Очень жарко (%s°C)* — поливай на 50%% больше и опрыскивай листья!" % temp
+    elif temp >= 28:
+        return "☀️", "*Жарко (%s°C)* — поливай на 30%% чаще, проверь влажность." % temp
+    elif temp >= 22:
+        return "🌤️", "*Тепло (%s°C)* — обычный режим полива." % temp
+    elif temp >= 15:
+        return "🍃", "*Прохладно (%s°C)* — можно поливать чуть реже." % temp
+    else:
+        return "🧥", "*Холодно (%s°C)* — сократи полив, растения в покое." % temp
+
+
 async def send_morning_reminders(bot):
-    """Утром — напоминание всем у кого просрочен полив."""
+    """Умные утренние напоминания с учётом погоды."""
+    from weather import get_weather
+
     user_ids = await db.get_users_with_overdue_plants()
     logger.info(f"Morning reminders: {len(user_ids)} users")
 
@@ -24,27 +42,40 @@ async def send_morning_reminders(bot):
         if not overdue and not today:
             continue
 
-        lines = ["🌅 *Доброе утро! Пора позаботиться о растениях.*\n"]
+        # Получаем погоду для пользователя
+        loc = await db.get_user_location(user_id)
+        weather = await get_weather(loc[0], loc[1]) if loc else await get_weather()
+        temp = weather.get("temperature")
+        weather_icon, weather_tip = await _get_smart_watering_tip(temp)
+
+        lines = ["🌅 *Доброе утро!* " + weather_icon + "\n"]
+
+        if weather_tip:
+            lines.append(weather_tip + "\n")
+
         if overdue:
             lines.append("⚠️ *Просрочено:*")
             for p in overdue:
                 name = p.get("nickname") or p["name"]
                 info = p.get("days_overdue", p.get("status", ""))
-                suffix = f" (+{info} дн.)" if isinstance(info, int) else f" ({info})"
-                lines.append(f"  🌿 {name}{suffix}")
+                suffix = " (+%s дн.)" % info if isinstance(info, int) else " (%s)" % info
+                if temp and temp >= 28:
+                    suffix += " 💦"
+                lines.append("  🌿 " + name + suffix)
 
         if today:
             lines.append("\n💧 *Полить сегодня:*")
             for p in today:
-                lines.append(f"  🌿 {p.get('nickname') or p['name']}")
+                name = p.get("nickname") or p["name"]
+                extra = " 💦" if temp and temp >= 28 else ""
+                lines.append("  🌿 " + name + extra)
 
-        lines.append("\nНапиши «полил [растение]» или нажми кнопку 💧 в /plants")
+        lines.append("\nНажми 💧 в /plants или напиши «полил [растение]»")
 
         try:
             await bot.send_message(user_id, "\n".join(lines), parse_mode="Markdown")
         except Exception as e:
             logger.warning(f"Morning reminder failed for {user_id}: {e}")
-
 
 async def send_evening_reminders(bot):
     """Вечером — повторное напоминание только тем кто НЕ полил с утра."""
