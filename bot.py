@@ -498,20 +498,12 @@ async def handle_photo(message: Message, state: FSMContext):
 
     caption = message.caption or ""
 
+    # Передаём file_id отдельно — минимум текста чтобы не мешать анализу фото
     if caption:
-        # Пользователь написал что-то — добавляем запрос полного анализа
-        user_text = (
-            f"[photo_file_id: {photo.file_id}]\n{caption}\n\n"
-            "Определи растение и дай полный анализ по уходу."
-        )
+        user_text = f"[photo_file_id: {photo.file_id}] {caption}"
     else:
-        # Просто фото — полный анализ
-        user_text = (
-            f"[photo_file_id: {photo.file_id}]\n"
-            "Определи это растение и дай полный анализ: полив, освещение, температура, "
-            "влажность, удобрения, пересадка, частые болезни. "
-            "Если видишь проблемы на фото — диагностируй их."
-        )
+        user_text = f"[photo_file_id: {photo.file_id}]"
+
     await agent_reply(message, user_text, image_b64=image_b64)
 
 
